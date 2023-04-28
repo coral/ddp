@@ -178,8 +178,10 @@ type DDPClient struct {
 	server *net.PacketConn
 }
 
-func (c *DDPClient) Send(data []byte) (int, error) {
-	fmt.Println(append(c.header.Bytes(), data...))
+func (c *DDPClient) Write(data []byte) (int, error) {
+	//fmt.Println(append(c.header.Bytes(), data...))
+
+	c.header.Length = uint16(len(data) / 3)
 	return c.output.Write(append(c.header.Bytes(), data...))
 }
 
@@ -191,8 +193,8 @@ func DefaultDDPHeader() DDPHeader {
 	return NewDDPHeader(NewConfigFlag(false, false, false, false, true), 0x00, PixelDataType{RGB, Pixel24Bits, false}, 0x01, 0, 3)
 }
 
-func NewDDPClient() DDPClient {
-	return DDPClient{header: DefaultDDPHeader()}
+func NewDDPClient() *DDPClient {
+	return &DDPClient{header: DefaultDDPHeader()}
 }
 
 func (d *DDPClient) ConnectUDP(addrString string) error {
