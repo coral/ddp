@@ -1,7 +1,11 @@
+// ddp implements parts of the Distributed Display Protocol (DDP) for sending pixel data to LED strips.
+// based on the http://www.3waylabs.com/ddp/ specification.
+// This is a work in progress, and is not yet fully implemented.
 package ddp
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,9 +15,6 @@ import (
 const (
 	DDP_PORT        = 4048
 	DDP_MAX_DATALEN = 480 * 3
-	DDP_ID_DISPLAY  = 1
-	DDP_ID_CONFIG   = 250
-	DDP_ID_STATUS   = 251
 )
 
 const (
@@ -127,18 +128,18 @@ func (p *PixelDataType) Byte() byte {
 }
 
 type DDPHeader struct {
-	F1       ConfigFlag
-	F2       byte
-	DataType PixelDataType
-	ID       byte
-	Offset   uint32
-	Length   uint16
+	F1             ConfigFlag
+	SequenceNumber byte
+	DataType       PixelDataType
+	ID             byte
+	Offset         uint32
+	Length         uint16
 }
 
 func (d *DDPHeader) Bytes() []byte {
 	var header []byte
 	header = append(header, d.F1.Byte())
-	header = append(header, d.F2)
+	header = append(header, d.SequenceNumber)
 	header = append(header, d.DataType.Byte())
 	header = append(header, d.ID)
 
@@ -160,7 +161,7 @@ func (d *DDPHeader) Bytes() []byte {
 func NewDDPHeader(f1 ConfigFlag, f2 byte, dataType PixelDataType, id byte, offset uint32, length uint16) DDPHeader {
 	h := DDPHeader{}
 	h.F1 = f1
-	h.F2 = f2
+	h.SequenceNumber = f2
 	h.DataType = dataType
 	h.ID = id
 	h.Offset = offset
@@ -169,8 +170,7 @@ func NewDDPHeader(f1 ConfigFlag, f2 byte, dataType PixelDataType, id byte, offse
 	return h
 }
 
-// Implementing http://www.3waylabs.com/ddp/
-
+// DDPClient connects to a pixel server and sends pixel data
 type DDPClient struct {
 	header DDPHeader
 
@@ -178,10 +178,28 @@ type DDPClient struct {
 	server *net.PacketConn
 }
 
-func (c *DDPClient) Write(data []byte) (int, error) {
-	//fmt.Println(append(c.header.Bytes(), data...))
+func (c *DDPClient) WriteOffset(data []byte, offset uint32) (int, error) {
+	c.header.Offset = offset
+	return c.Write(append(c.header.Bytes(), data...))
+}
 
-	c.header.Length = uint16(len(data) / 3)
+// Writes pixel data to the DDP server, without offset
+func (c *DDPClient) Write(data []byte) (int, error) {
+
+	if len(data) > DDP_MAX_DATALEN {
+		return 0, fmt.Errorf("data length %d exceeds maximum of %d", len(data), DDP_MAX_DATALEN)
+	}
+
+	// Iterate on sequence number
+	if c.header.SequenceNumber != 0x00 {
+		if c.header.SequenceNumber > 15 {
+			c.header.SequenceNumber = 1
+		} else {
+			c.header.SequenceNumber++
+		}
+	}
+
+	c.header.Length = uint16(len(data))
 	return c.output.Write(append(c.header.Bytes(), data...))
 }
 
@@ -189,8 +207,31 @@ func (c *DDPClient) SetDefaultHeader(h DDPHeader) {
 	c.header = h
 }
 
+func (c *DDPClient) SetOffset(offset uint32) {
+	c.header.Offset = offset
+}
+
+func (c *DDPClient) SetID(id uint8) error {
+	// 0 = reserved
+	// 1 = default output device
+	// 2=249 custom IDs, (possibly defined via JSON config)
+	// 246 = JSON control (read/write)
+	// 250 = JSON config  (read/write)
+	// 251 = JSON status  (read only)
+	// 254 = DMX transit
+	// 255 = all devices
+
+	if id == 0 {
+		return errors.New("ID 0 is reserved")
+	}
+
+	c.header.ID = byte(id)
+
+	return nil
+}
+
 func DefaultDDPHeader() DDPHeader {
-	return NewDDPHeader(NewConfigFlag(false, false, false, false, true), 0x00, PixelDataType{RGB, Pixel24Bits, false}, 0x01, 0, 3)
+	return NewDDPHeader(NewConfigFlag(false, false, false, false, true), 0x01, PixelDataType{RGB, Pixel24Bits, false}, 0x01, 0, 132)
 }
 
 func NewDDPClient() *DDPClient {
@@ -214,7 +255,7 @@ func (d *DDPClient) ConnectUDP(addrString string) error {
 	d.output = conn
 
 	// Listen for UDP packets
-	udpServer, err := net.ListenPacket("udp", ":4048")
+	udpServer, err := net.ListenPacket("udp", fmt.Sprintf(":%d", addr.Port))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -235,12 +276,12 @@ func (d *DDPClient) Close() error {
 func (d *DDPClient) handlePackets() {
 	buf := make([]byte, 65507)
 	for {
-		n, addr, err := (*d.server).ReadFrom(buf)
+		_, _, err := (*d.server).ReadFrom(buf)
 		if err != nil {
-			log.Fatal(err)
+			log.Print(err)
 		}
 
-		fmt.Println("Received ", n, " bytes from ", addr)
-		fmt.Println(buf)
+		//fmt.Println("Received ", n, " bytes from ", addr)
+		//fmt.Println(buf[0:n], (len(buf[0:n])-10)/3)
 	}
 }
