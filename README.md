@@ -3,6 +3,8 @@
 This package allows you to write pixel data to a LED strip over [DDP](http://www.3waylabs.com/ddp/)
 Currently implements sending but haven't gotten to implementing response parsing, works for most use cases though.
 
+You can use this to stream pixel data to [WLED](https://github.com/Aircoookie/WLED) or any other DDP capable reciever.
+
 ## Simple Example
 
 ```go
