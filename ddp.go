@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"time"
 )
 
 const (
@@ -80,16 +79,28 @@ func NewConfigFlag(timecode bool, storage bool, reply bool, query bool, push boo
 type LEDDataType uint8
 
 const (
-	Undefined LEDDataType = iota
+	UndefinedType LEDDataType = iota
 	RGB
 	HSL
 	RGBW
 	Grayscale
 )
 
+type LEDPixelFormat uint8
+
+const (
+	UndefinedPixelFormat LEDPixelFormat = iota
+	Pixel1Bits
+	Pixel4Bits
+	Pixel8Bits
+	Pixel16Bits
+	Pixel24Bits
+	Pixel32Bits
+)
+
 type PixelDataType struct {
 	DataType        LEDDataType
-	DataSize        int
+	DataSize        LEDPixelFormat
 	CustomerDefined bool
 }
 
@@ -100,7 +111,7 @@ func PixelDataTypeFromByte(b byte) *PixelDataType {
 
 	return &PixelDataType{
 		DataType:        LEDDataType(dataType),
-		DataSize:        int(dataSize),
+		DataSize:        LEDPixelFormat(dataSize),
 		CustomerDefined: customerDefined,
 	}
 }
@@ -158,11 +169,12 @@ func NewDDPHeader(f1 ConfigFlag, f2 byte, dataType PixelDataType, id byte, offse
 	return h
 }
 
+// Implementing http://www.3waylabs.com/ddp/
+
 type DDPClient struct {
 	header DDPHeader
 
-	output io.Writer
-
+	output io.WriteCloser
 	server *net.PacketConn
 }
 
@@ -171,8 +183,12 @@ func (c *DDPClient) Send(data []byte) (int, error) {
 	return c.output.Write(append(c.header.Bytes(), data...))
 }
 
+func (c *DDPClient) SetDefaultHeader(h DDPHeader) {
+	c.header = h
+}
+
 func DefaultDDPHeader() DDPHeader {
-	return NewDDPHeader(NewConfigFlag(false, false, false, false, true), 0x00, PixelDataType{RGB, 2, false}, 0x01, 0, 3)
+	return NewDDPHeader(NewConfigFlag(false, false, false, false, true), 0x00, PixelDataType{RGB, Pixel24Bits, false}, 0x01, 0, 3)
 }
 
 func NewDDPClient() DDPClient {
@@ -200,7 +216,6 @@ func (d *DDPClient) ConnectUDP(addrString string) error {
 	if err != nil {
 		log.Fatal(err)
 	}
-	udpServer.SetDeadline(time.Now().Add(10 * time.Second))
 
 	d.server = &udpServer
 
@@ -211,15 +226,13 @@ func (d *DDPClient) ConnectUDP(addrString string) error {
 }
 
 func (d *DDPClient) Close() error {
+	d.output.Close()
 	return (*d.server).Close()
 }
 
 func (d *DDPClient) handlePackets() {
 	buf := make([]byte, 65507)
 	for {
-		// Empty buffer, keep memory
-		buf = buf[:0]
-
 		n, addr, err := (*d.server).ReadFrom(buf)
 		if err != nil {
 			log.Fatal(err)
@@ -234,56 +247,10 @@ func main() {
 
 	client := NewDDPClient()
 	client.ConnectUDP("10.0.1.9:4048")
-	written, err := client.Send([]byte{0xFF, 0xFF, 0xFF})
+	written, err := client.Send([]byte{128, 36, 12})
 	fmt.Println(written, err)
 
 	channel := make(chan int)
 	<-channel
-
-	// // Open a UDP connection to port 4048
-	// addr, err := net.ResolveUDPAddr("udp", "10.0.1.9:4048")
-	// if err != nil {
-	// 	fmt.Printf("Error resolving UDP address: %v\n", err)
-	// 	return
-	// }
-	// conn, err := net.DialUDP("udp", nil, addr)
-	// if err != nil {
-	// 	fmt.Printf("Error dialing UDP connection: %v\n", err)
-	// 	return
-	// }
-	// defer conn.Close()
-
-	// conn.Write([]byte{65, 0, 10, 1, 0, 0, 0, 0, 0, 3, 0xFF, 0xFF, 0xFF})
-
-	// udpServer, err := net.ListenPacket("udp", ":4048")
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// defer udpServer.Close()
-
-	// DDPClient := NewDDPClientFromWriter(conn)
-
-	// written, err := DDPClient.Send([]byte{0xFF, 0xFF, 0xFF})
-	// if err != nil {
-	// 	panic(err)
-	// 	return
-	// }
-	// fmt.Println(written)
-	// for {
-	// 	buf := make([]byte, 1024)
-	// 	_, addr, err := udpServer.ReadFrom(buf)
-	// 	if err != nil {
-	// 		continue
-	// 	}
-
-	// 	fmt.Println(buf[0:10], addr)
-	// 	cf := ConfigFlag{}
-	// 	cf.FromByte(buf[0])
-
-	// 	fmt.Println(cf)
-
-	// 	fmt.Println(PixelDataTypeFromByte(buf[2]))
-	// 	return
-	// }
 
 }
