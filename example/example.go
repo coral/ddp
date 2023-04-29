@@ -8,7 +8,7 @@ import (
 
 func main() {
 
-	client := ddp.NewDDPClient()
+	client := ddp.NewDDPController()
 	client.ConnectUDP("10.0.1.9:4048")
 
 	//Write one pixel
