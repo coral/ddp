@@ -9,7 +9,7 @@ You can use this to stream pixel data to [WLED](https://github.com/Aircoookie/WL
 
 ```go
 // Create a new DDP client
-client := ddp.NewDDPClient()
+client := ddp.NewDDPController()
 
 // Connect to DDP server over UDP
 client.ConnectUDP("10.0.1.9:4048")

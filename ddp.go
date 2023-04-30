@@ -170,21 +170,21 @@ func NewDDPHeader(f1 ConfigFlag, f2 byte, dataType PixelDataType, id byte, offse
 	return h
 }
 
-// DDPClient connects to a pixel server and sends pixel data
-type DDPClient struct {
+// DDPController connects to a pixel server and sends pixel data
+type DDPController struct {
 	header DDPHeader
 
 	output io.WriteCloser
 	server *net.PacketConn
 }
 
-func (c *DDPClient) WriteOffset(data []byte, offset uint32) (int, error) {
+func (c *DDPController) WriteOffset(data []byte, offset uint32) (int, error) {
 	c.header.Offset = offset
 	return c.Write(append(c.header.Bytes(), data...))
 }
 
 // Writes pixel data to the DDP server, without offset
-func (c *DDPClient) Write(data []byte) (int, error) {
+func (c *DDPController) Write(data []byte) (int, error) {
 
 	if len(data) > DDP_MAX_DATALEN {
 		return 0, fmt.Errorf("data length %d exceeds maximum of %d", len(data), DDP_MAX_DATALEN)
@@ -203,15 +203,15 @@ func (c *DDPClient) Write(data []byte) (int, error) {
 	return c.output.Write(append(c.header.Bytes(), data...))
 }
 
-func (c *DDPClient) SetDefaultHeader(h DDPHeader) {
+func (c *DDPController) SetDefaultHeader(h DDPHeader) {
 	c.header = h
 }
 
-func (c *DDPClient) SetOffset(offset uint32) {
+func (c *DDPController) SetOffset(offset uint32) {
 	c.header.Offset = offset
 }
 
-func (c *DDPClient) SetID(id uint8) error {
+func (c *DDPController) SetID(id uint8) error {
 	// 0 = reserved
 	// 1 = default output device
 	// 2=249 custom IDs, (possibly defined via JSON config)
@@ -234,11 +234,11 @@ func DefaultDDPHeader() DDPHeader {
 	return NewDDPHeader(NewConfigFlag(false, false, false, false, true), 0x01, PixelDataType{RGB, Pixel24Bits, false}, 0x01, 0, 132)
 }
 
-func NewDDPClient() *DDPClient {
-	return &DDPClient{header: DefaultDDPHeader()}
+func NewDDPController() *DDPController {
+	return &DDPController{header: DefaultDDPHeader()}
 }
 
-func (d *DDPClient) ConnectUDP(addrString string) error {
+func (d *DDPController) ConnectUDP(addrString string) error {
 
 	// Resolve UDP address
 	addr, err := net.ResolveUDPAddr("udp", addrString)
@@ -268,12 +268,12 @@ func (d *DDPClient) ConnectUDP(addrString string) error {
 
 }
 
-func (d *DDPClient) Close() error {
+func (d *DDPController) Close() error {
 	d.output.Close()
 	return (*d.server).Close()
 }
 
-func (d *DDPClient) handlePackets() {
+func (d *DDPController) handlePackets() {
 	buf := make([]byte, 65507)
 	for {
 		_, _, err := (*d.server).ReadFrom(buf)
