@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"time"
 )
 
 const (
@@ -134,6 +135,7 @@ type DDPHeader struct {
 	ID             byte
 	Offset         uint32
 	Length         uint16
+	Timecode       uint32 // Optional: 32-bit NTP timecode (middle bits of 64-bit NTP time)
 }
 
 func (d *DDPHeader) Bytes() []byte {
@@ -153,7 +155,12 @@ func (d *DDPHeader) Bytes() []byte {
 	binary.BigEndian.PutUint16(lengthBuf, d.Length)
 	header = append(header, lengthBuf...)
 
-	// TODO: TIMECODE
+	// Add timecode if timecode flag is set
+	if d.F1.Timecode {
+		timecodeBuf := make([]byte, 4)
+		binary.BigEndian.PutUint32(timecodeBuf, d.Timecode)
+		header = append(header, timecodeBuf...)
+	}
 
 	return header
 }
@@ -228,6 +235,46 @@ func (c *DDPController) SetID(id uint8) error {
 	c.header.ID = byte(id)
 
 	return nil
+}
+
+// SetTimecode enables timecode and sets the value
+// The timecode is the 32 middle bits of 64-bit NTP time
+func (c *DDPController) SetTimecode(timecode uint32) {
+	c.header.F1.Timecode = true
+	c.header.Timecode = timecode
+}
+
+// DisableTimecode disables timecode support
+func (c *DDPController) DisableTimecode() {
+	c.header.F1.Timecode = false
+	c.header.Timecode = 0
+}
+
+// TimeToNTPTimecode converts a time.Time to the 32-bit NTP timecode used by DDP
+// Returns the middle 32 bits of 64-bit NTP time (16 bits seconds, 16 bits fraction)
+func TimeToNTPTimecode(t time.Time) uint32 {
+	// NTP epoch is January 1, 1900
+	// Unix epoch is January 1, 1970
+	// Difference is 70 years + 17 leap days = 2208988800 seconds
+	const ntpEpochOffset = 2208988800
+
+	unixSecs := t.Unix()
+	ntpSecs := uint64(unixSecs + ntpEpochOffset)
+
+	// Get nanoseconds and convert to NTP fraction (2^32 units per second)
+	nanos := uint64(t.Nanosecond())
+	ntpFrac := (nanos << 32) / 1000000000
+
+	// Build 64-bit NTP timestamp
+	ntpTime := (ntpSecs << 32) | ntpFrac
+
+	// Return middle 32 bits (16 bits of seconds, 16 bits of fraction)
+	return uint32((ntpTime >> 16) & 0xFFFFFFFF)
+}
+
+// NTPTimecodeFromDuration creates an NTP timecode from a duration relative to now
+func NTPTimecodeFromDuration(d time.Duration) uint32 {
+	return TimeToNTPTimecode(time.Now().Add(d))
 }
 
 func DefaultDDPHeader() DDPHeader {

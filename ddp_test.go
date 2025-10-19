@@ -3,6 +3,7 @@ package ddp
 import (
 	"bytes"
 	"testing"
+	"time"
 )
 
 // mockWriteCloser for testing
@@ -288,7 +289,7 @@ func TestDDPHeaderBytes(t *testing.T) {
 			expected: []byte{0x41, 0x0C, 0x0D, 0x01, 0x00, 0x00, 0x99, 0xd5, 0x01, 0x19},
 		},
 		{
-			name: "header with all flags set",
+			name: "header with all flags set (including timecode)",
 			header: DDPHeader{
 				F1:             NewConfigFlag(true, true, true, true, true),
 				SequenceNumber: 15,
@@ -296,8 +297,9 @@ func TestDDPHeaderBytes(t *testing.T) {
 				ID:             255,
 				Offset:         0xDEADBEEF,
 				Length:         0xABCD,
+				Timecode:       0x12345678,
 			},
-			expected: []byte{0x5F, 0x0F, 0x9B, 0xFF, 0xDE, 0xAD, 0xBE, 0xEF, 0xAB, 0xCD},
+			expected: []byte{0x5F, 0x0F, 0x9B, 0xFF, 0xDE, 0xAD, 0xBE, 0xEF, 0xAB, 0xCD, 0x12, 0x34, 0x56, 0x78},
 		},
 		{
 			name: "default header",
@@ -782,5 +784,200 @@ func TestCompleteDDPPacket(t *testing.T) {
 	// Bytes 10+: Pixel data
 	if !bytes.Equal(mock.data[10:], pixelData) {
 		t.Errorf("Pixel data mismatch")
+	}
+}
+
+// Test timecode header serialization
+func TestTimecodeHeader(t *testing.T) {
+	header := DDPHeader{
+		F1:             NewConfigFlag(true, false, false, false, true), // timecode enabled
+		SequenceNumber: 1,
+		DataType:       PixelDataType{RGB, Pixel8Bits, false},
+		ID:             1,
+		Offset:         0,
+		Length:         3,
+		Timecode:       0x12345678,
+	}
+
+	result := header.Bytes()
+
+	// Header should be 14 bytes with timecode
+	if len(result) != 14 {
+		t.Errorf("Header with timecode size = %d, expected 14", len(result))
+	}
+
+	// Check timecode flag is set (byte 0 should have bit 4 set)
+	if result[0]&0x10 == 0 {
+		t.Errorf("Timecode flag not set in flags byte: 0x%02X", result[0])
+	}
+
+	// Check timecode value (bytes 10-13, big endian)
+	timecode := uint32(result[10])<<24 | uint32(result[11])<<16 | uint32(result[12])<<8 | uint32(result[13])
+	if timecode != 0x12345678 {
+		t.Errorf("Timecode = 0x%08X, expected 0x12345678", timecode)
+	}
+}
+
+// Test header without timecode (backward compatibility)
+func TestHeaderWithoutTimecode(t *testing.T) {
+	header := DDPHeader{
+		F1:             NewConfigFlag(false, false, false, false, true), // timecode disabled
+		SequenceNumber: 1,
+		DataType:       PixelDataType{RGB, Pixel8Bits, false},
+		ID:             1,
+		Offset:         0,
+		Length:         3,
+		Timecode:       0x12345678, // Set but should be ignored
+	}
+
+	result := header.Bytes()
+
+	// Header should be 10 bytes without timecode
+	if len(result) != 10 {
+		t.Errorf("Header without timecode size = %d, expected 10", len(result))
+	}
+
+	// Check timecode flag is not set
+	if result[0]&0x10 != 0 {
+		t.Errorf("Timecode flag should not be set: 0x%02X", result[0])
+	}
+}
+
+// Test SetTimecode method
+func TestSetTimecode(t *testing.T) {
+	controller, mock := newMockController()
+
+	// Enable timecode
+	testTimecode := uint32(0xABCD1234)
+	controller.SetTimecode(testTimecode)
+
+	// Verify timecode is enabled
+	if !controller.header.F1.Timecode {
+		t.Error("Timecode flag should be enabled")
+	}
+
+	if controller.header.Timecode != testTimecode {
+		t.Errorf("Timecode = 0x%08X, expected 0x%08X", controller.header.Timecode, testTimecode)
+	}
+
+	// Write some data
+	data := []byte{0xFF, 0x00, 0xFF}
+	_, err := controller.Write(data)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	// Check packet has 14-byte header
+	if len(mock.data) != 14+len(data) {
+		t.Errorf("Packet size = %d, expected %d (14 byte header + %d data)", len(mock.data), 14+len(data), len(data))
+	}
+
+	// Verify timecode in packet
+	timecode := uint32(mock.data[10])<<24 | uint32(mock.data[11])<<16 | uint32(mock.data[12])<<8 | uint32(mock.data[13])
+	if timecode != testTimecode {
+		t.Errorf("Written timecode = 0x%08X, expected 0x%08X", timecode, testTimecode)
+	}
+}
+
+// Test DisableTimecode method
+func TestDisableTimecode(t *testing.T) {
+	controller, mock := newMockController()
+
+	// Enable then disable timecode
+	controller.SetTimecode(0x12345678)
+	controller.DisableTimecode()
+
+	// Verify timecode is disabled
+	if controller.header.F1.Timecode {
+		t.Error("Timecode flag should be disabled")
+	}
+
+	if controller.header.Timecode != 0 {
+		t.Errorf("Timecode = 0x%08X, expected 0", controller.header.Timecode)
+	}
+
+	// Write some data
+	data := []byte{0xFF, 0x00, 0xFF}
+	_, err := controller.Write(data)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	// Check packet has 10-byte header (no timecode)
+	if len(mock.data) != 10+len(data) {
+		t.Errorf("Packet size = %d, expected %d (10 byte header + %d data)", len(mock.data), 10+len(data), len(data))
+	}
+}
+
+// Test NTP timecode conversion
+func TestTimeToNTPTimecode(t *testing.T) {
+	// Test with a known time
+	// January 1, 2020 00:00:00 UTC
+	testTime := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	timecode := TimeToNTPTimecode(testTime)
+
+	// Timecode should be non-zero
+	if timecode == 0 {
+		t.Error("Timecode should not be zero")
+	}
+
+	// Test that different times produce different timecodes
+	testTime2 := testTime.Add(1 * time.Second)
+	timecode2 := TimeToNTPTimecode(testTime2)
+
+	if timecode == timecode2 {
+		t.Error("Different times should produce different timecodes")
+	}
+
+	// The difference should be approximately 2^16 (65536) for 1 second
+	// since we're using the middle 32 bits where upper 16 are seconds
+	diff := int64(timecode2) - int64(timecode)
+	expectedDiff := int64(65536)
+
+	// Allow some tolerance for fraction bits
+	if diff < expectedDiff-1000 || diff > expectedDiff+1000 {
+		t.Errorf("1 second difference produced timecode diff of %d, expected ~%d", diff, expectedDiff)
+	}
+}
+
+// Test NTPTimecodeFromDuration
+func TestNTPTimecodeFromDuration(t *testing.T) {
+	// Get timecode for 1 second in the future
+	timecode := NTPTimecodeFromDuration(1 * time.Second)
+
+	// Should be non-zero
+	if timecode == 0 {
+		t.Error("Timecode should not be zero")
+	}
+
+	// Get timecode for now
+	now := TimeToNTPTimecode(time.Now())
+
+	// Future timecode should be greater than now
+	if timecode <= now {
+		t.Error("Future timecode should be greater than current timecode")
+	}
+}
+
+// Test backward compatibility - existing code should work unchanged
+func TestBackwardCompatibility(t *testing.T) {
+	controller, mock := newMockController()
+
+	// Use controller without touching timecode (like existing code)
+	data := []byte{255, 0, 0}
+	_, err := controller.Write(data)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	// Should produce 10-byte header (no timecode)
+	if len(mock.data) != 10+len(data) {
+		t.Errorf("Backward compatible packet should have 10-byte header, got %d total bytes", len(mock.data))
+	}
+
+	// Timecode flag should not be set
+	if mock.data[0]&0x10 != 0 {
+		t.Error("Default controller should not have timecode flag set")
 	}
 }
