@@ -177,6 +177,54 @@ func NewDDPHeader(f1 ConfigFlag, f2 byte, dataType PixelDataType, id byte, offse
 	return h
 }
 
+// ParseDDPHeader parses a DDP header from bytes
+// Returns the header and the number of bytes consumed (10 or 14)
+func ParseDDPHeader(data []byte) (*DDPHeader, int, error) {
+	if len(data) < 10 {
+		return nil, 0, errors.New("insufficient data for DDP header (need at least 10 bytes)")
+	}
+
+	header := &DDPHeader{}
+
+	// Parse flags
+	header.F1.FromByte(data[0])
+
+	// Parse sequence number
+	header.SequenceNumber = data[1]
+
+	// Parse data type
+	dt := PixelDataTypeFromByte(data[2])
+	header.DataType = *dt
+
+	// Parse ID
+	header.ID = data[3]
+
+	// Parse offset (big endian)
+	header.Offset = binary.BigEndian.Uint32(data[4:8])
+
+	// Parse length (big endian)
+	header.Length = binary.BigEndian.Uint16(data[8:10])
+
+	bytesConsumed := 10
+
+	// Parse timecode if present
+	if header.F1.Timecode {
+		if len(data) < 14 {
+			return nil, 0, errors.New("insufficient data for DDP header with timecode (need 14 bytes)")
+		}
+		header.Timecode = binary.BigEndian.Uint32(data[10:14])
+		bytesConsumed = 14
+	}
+
+	return header, bytesConsumed, nil
+}
+
+// DDPPacket represents a complete received DDP packet
+type DDPPacket struct {
+	Header DDPHeader
+	Data   []byte
+}
+
 // DDPController connects to a pixel server and sends pixel data
 type DDPController struct {
 	header DDPHeader
@@ -184,6 +232,16 @@ type DDPController struct {
 	output io.WriteCloser
 	server *net.PacketConn
 }
+
+// DDPServer listens for DDP packets
+type DDPServer struct {
+	conn     *net.UDPConn
+	handlers map[byte]PacketHandler
+	running  bool
+}
+
+// PacketHandler is called when a packet is received for a specific ID
+type PacketHandler func(packet *DDPPacket, addr *net.UDPAddr) error
 
 func (c *DDPController) WriteOffset(data []byte, offset uint32) (int, error) {
 	c.header.Offset = offset
@@ -301,10 +359,13 @@ func (d *DDPController) ConnectUDP(addrString string) error {
 
 	d.output = conn
 
-	// Listen for UDP packets
-	udpServer, err := net.ListenPacket("udp", fmt.Sprintf(":%d", addr.Port))
+	// Listen for UDP packets on any available port (for receiving replies)
+	// Use port 0 to let the OS assign an available port
+	udpServer, err := net.ListenPacket("udp", ":0")
 	if err != nil {
-		log.Fatal(err)
+		// If listening fails, just log and continue without reply support
+		log.Printf("Warning: could not start listener for replies: %v", err)
+		return nil
 	}
 
 	d.server = &udpServer
@@ -316,8 +377,13 @@ func (d *DDPController) ConnectUDP(addrString string) error {
 }
 
 func (d *DDPController) Close() error {
-	d.output.Close()
-	return (*d.server).Close()
+	if d.output != nil {
+		d.output.Close()
+	}
+	if d.server != nil {
+		return (*d.server).Close()
+	}
+	return nil
 }
 
 func (d *DDPController) handlePackets() {
@@ -325,10 +391,140 @@ func (d *DDPController) handlePackets() {
 	for {
 		_, _, err := (*d.server).ReadFrom(buf)
 		if err != nil {
-			log.Print(err)
+			// Ignore closed network connection errors (happens during Close())
+			if !isClosedError(err) {
+				log.Print(err)
+			}
+			return
 		}
 
 		//fmt.Println("Received ", n, " bytes from ", addr)
 		//fmt.Println(buf[0:n], (len(buf[0:n])-10)/3)
 	}
+}
+
+// isClosedError checks if an error is due to a closed connection
+func isClosedError(err error) bool {
+	return err != nil && (err.Error() == "use of closed network connection" ||
+		err.Error() == "EOF")
+}
+
+// NewDDPServer creates a new DDP server
+func NewDDPServer() *DDPServer {
+	return &DDPServer{
+		handlers: make(map[byte]PacketHandler),
+		running:  false,
+	}
+}
+
+// RegisterHandler registers a handler for packets with a specific ID
+func (s *DDPServer) RegisterHandler(id byte, handler PacketHandler) {
+	s.handlers[id] = handler
+}
+
+// RegisterDefaultHandler registers a handler for all unhandled IDs
+func (s *DDPServer) RegisterDefaultHandler(handler PacketHandler) {
+	s.handlers[0xFF] = handler // Use 0xFF as special "default" key internally
+}
+
+// Listen starts the server on the specified address
+// If addr is empty, listens on ":4048" (all interfaces, default DDP port)
+func (s *DDPServer) Listen(addr string) error {
+	if addr == "" {
+		addr = fmt.Sprintf(":%d", DDP_PORT)
+	}
+
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to resolve address: %w", err)
+	}
+
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return fmt.Errorf("failed to listen on UDP: %w", err)
+	}
+
+	s.conn = conn
+	s.running = true
+
+	log.Printf("DDP server listening on %s", addr)
+
+	return s.serve()
+}
+
+// serve handles incoming packets
+func (s *DDPServer) serve() error {
+	buf := make([]byte, 65507) // Max UDP packet size
+
+	for s.running {
+		n, addr, err := s.conn.ReadFromUDP(buf)
+		if err != nil {
+			if !s.running {
+				return nil // Server was closed
+			}
+			log.Printf("Error reading packet: %v", err)
+			continue
+		}
+
+		// Parse packet in a goroutine to avoid blocking
+		go s.handlePacket(buf[:n], addr)
+	}
+
+	return nil
+}
+
+// handlePacket processes a single DDP packet
+func (s *DDPServer) handlePacket(data []byte, addr *net.UDPAddr) {
+	// Parse header
+	header, headerSize, err := ParseDDPHeader(data)
+	if err != nil {
+		log.Printf("Failed to parse header from %s: %v", addr, err)
+		return
+	}
+
+	// Extract payload
+	payload := []byte{}
+	if len(data) > headerSize {
+		expectedPayloadSize := int(header.Length)
+		actualPayloadSize := len(data) - headerSize
+
+		if actualPayloadSize < expectedPayloadSize {
+			log.Printf("Warning: payload size mismatch from %s (expected %d, got %d)",
+				addr, expectedPayloadSize, actualPayloadSize)
+			payload = data[headerSize:]
+		} else {
+			payload = data[headerSize : headerSize+expectedPayloadSize]
+		}
+	}
+
+	// Create packet
+	packet := &DDPPacket{
+		Header: *header,
+		Data:   payload,
+	}
+
+	// Find and call handler
+	handler, exists := s.handlers[header.ID]
+	if !exists {
+		// Try default handler
+		handler, exists = s.handlers[0xFF]
+		if !exists {
+			log.Printf("No handler for ID %d from %s", header.ID, addr)
+			return
+		}
+	}
+
+	// Call handler
+	if err := handler(packet, addr); err != nil {
+		log.Printf("Handler error for ID %d from %s: %v", header.ID, addr, err)
+	}
+}
+
+// Close stops the server
+func (s *DDPServer) Close() error {
+	s.running = false
+	if s.conn != nil {
+		return s.conn.Close()
+	}
+	return nil
 }

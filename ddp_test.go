@@ -2,6 +2,7 @@ package ddp
 
 import (
 	"bytes"
+	"net"
 	"testing"
 	"time"
 )
@@ -979,5 +980,408 @@ func TestBackwardCompatibility(t *testing.T) {
 	// Timecode flag should not be set
 	if mock.data[0]&0x10 != 0 {
 		t.Error("Default controller should not have timecode flag set")
+	}
+}
+
+// Test ParseDDPHeader with basic packet
+func TestParseDDPHeader(t *testing.T) {
+	// Create a basic 10-byte header
+	data := []byte{0x41, 0x06, 0x0B, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03}
+
+	header, size, err := ParseDDPHeader(data)
+	if err != nil {
+		t.Fatalf("ParseDDPHeader failed: %v", err)
+	}
+
+	if size != 10 {
+		t.Errorf("Header size = %d, expected 10", size)
+	}
+
+	if !header.F1.Push {
+		t.Error("Push flag should be set")
+	}
+
+	if header.SequenceNumber != 6 {
+		t.Errorf("Sequence number = %d, expected 6", header.SequenceNumber)
+	}
+
+	if header.DataType.DataType != RGB {
+		t.Errorf("Data type = %v, expected RGB", header.DataType.DataType)
+	}
+
+	if header.ID != 1 {
+		t.Errorf("ID = %d, expected 1", header.ID)
+	}
+
+	if header.Length != 3 {
+		t.Errorf("Length = %d, expected 3", header.Length)
+	}
+}
+
+// Test ParseDDPHeader with timecode
+func TestParseDDPHeaderWithTimecode(t *testing.T) {
+	// Create a 14-byte header with timecode
+	data := []byte{
+		0x51, 0x05, 0x0D, 0x01, // flags, seq, type, id
+		0x00, 0x00, 0x00, 0x64, // offset = 100
+		0x00, 0x09, // length = 9
+		0x12, 0x34, 0x56, 0x78, // timecode
+	}
+
+	header, size, err := ParseDDPHeader(data)
+	if err != nil {
+		t.Fatalf("ParseDDPHeader failed: %v", err)
+	}
+
+	if size != 14 {
+		t.Errorf("Header size = %d, expected 14", size)
+	}
+
+	if !header.F1.Timecode {
+		t.Error("Timecode flag should be set")
+	}
+
+	if header.Timecode != 0x12345678 {
+		t.Errorf("Timecode = 0x%08X, expected 0x12345678", header.Timecode)
+	}
+
+	if header.Offset != 100 {
+		t.Errorf("Offset = %d, expected 100", header.Offset)
+	}
+}
+
+// Test ParseDDPHeader with insufficient data
+func TestParseDDPHeaderInsufficientData(t *testing.T) {
+	// Only 9 bytes
+	data := []byte{0x41, 0x06, 0x0B, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00}
+
+	_, _, err := ParseDDPHeader(data)
+	if err == nil {
+		t.Error("Expected error for insufficient data")
+	}
+}
+
+// Test ParseDDPHeader with timecode flag but insufficient data
+func TestParseDDPHeaderTimecodeInsufficientData(t *testing.T) {
+	// Timecode flag set but only 10 bytes
+	data := []byte{0x51, 0x05, 0x0D, 0x01, 0x00, 0x00, 0x00, 0x64, 0x00, 0x09}
+
+	_, _, err := ParseDDPHeader(data)
+	if err == nil {
+		t.Error("Expected error for insufficient timecode data")
+	}
+}
+
+// Test header roundtrip (serialize -> parse)
+func TestHeaderRoundtrip(t *testing.T) {
+	original := DDPHeader{
+		F1:             NewConfigFlag(false, false, false, false, true),
+		SequenceNumber: 7,
+		DataType:       PixelDataType{RGBW, Pixel8Bits, false},
+		ID:             2,
+		Offset:         1234,
+		Length:         100,
+	}
+
+	// Serialize
+	serialized := original.Bytes()
+
+	// Parse
+	parsed, size, err := ParseDDPHeader(serialized)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if size != 10 {
+		t.Errorf("Size = %d, expected 10", size)
+	}
+
+	// Compare
+	if parsed.F1.Push != original.F1.Push {
+		t.Error("Push flag mismatch")
+	}
+	if parsed.SequenceNumber != original.SequenceNumber {
+		t.Errorf("Sequence number = %d, expected %d", parsed.SequenceNumber, original.SequenceNumber)
+	}
+	if parsed.ID != original.ID {
+		t.Errorf("ID = %d, expected %d", parsed.ID, original.ID)
+	}
+	if parsed.Offset != original.Offset {
+		t.Errorf("Offset = %d, expected %d", parsed.Offset, original.Offset)
+	}
+	if parsed.Length != original.Length {
+		t.Errorf("Length = %d, expected %d", parsed.Length, original.Length)
+	}
+}
+
+// Test header roundtrip with timecode
+func TestHeaderRoundtripWithTimecode(t *testing.T) {
+	original := DDPHeader{
+		F1:             NewConfigFlag(true, false, false, false, true),
+		SequenceNumber: 10,
+		DataType:       PixelDataType{RGB, Pixel24Bits, false},
+		ID:             1,
+		Offset:         5000,
+		Length:         1440,
+		Timecode:       0xABCDEF01,
+	}
+
+	// Serialize
+	serialized := original.Bytes()
+
+	// Parse
+	parsed, size, err := ParseDDPHeader(serialized)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if size != 14 {
+		t.Errorf("Size = %d, expected 14", size)
+	}
+
+	// Compare
+	if !parsed.F1.Timecode {
+		t.Error("Timecode flag should be set")
+	}
+	if parsed.Timecode != original.Timecode {
+		t.Errorf("Timecode = 0x%08X, expected 0x%08X", parsed.Timecode, original.Timecode)
+	}
+	if parsed.Offset != original.Offset {
+		t.Errorf("Offset = %d, expected %d", parsed.Offset, original.Offset)
+	}
+}
+
+// Test DDP server receiving packets
+func TestDDPServer(t *testing.T) {
+	server := NewDDPServer()
+
+	// Track received packets
+	received := make(chan *DDPPacket, 1)
+
+	// Register handler for ID 1
+	server.RegisterHandler(1, func(packet *DDPPacket, addr *net.UDPAddr) error {
+		received <- packet
+		return nil
+	})
+
+	// Start server on random port
+	go func() {
+		if err := server.Listen("127.0.0.1:0"); err != nil {
+			t.Logf("Server error: %v", err)
+		}
+	}()
+
+	// Give server time to start
+	time.Sleep(50 * time.Millisecond)
+	defer server.Close()
+
+	// Get the actual port the server is listening on
+	serverAddr := server.conn.LocalAddr().String()
+
+	// Create client and send packet
+	controller := NewDDPController()
+	err := controller.ConnectUDP(serverAddr)
+	if err != nil {
+		t.Fatalf("Failed to connect controller: %v", err)
+	}
+	defer controller.Close()
+
+	// Send test data
+	testData := []byte{255, 0, 0, 0, 255, 0, 0, 0, 255}
+	_, err = controller.Write(testData)
+	if err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+
+	// Wait for packet to be received
+	select {
+	case packet := <-received:
+		// Verify packet
+		if packet.Header.ID != 1 {
+			t.Errorf("ID = %d, expected 1", packet.Header.ID)
+		}
+		if !bytes.Equal(packet.Data, testData) {
+			t.Errorf("Data mismatch: got %v, expected %v", packet.Data, testData)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout waiting for packet")
+	}
+}
+
+// Test server with default handler
+func TestDDPServerDefaultHandler(t *testing.T) {
+	server := NewDDPServer()
+
+	received := make(chan *DDPPacket, 1)
+
+	// Register default handler
+	server.RegisterDefaultHandler(func(packet *DDPPacket, addr *net.UDPAddr) error {
+		received <- packet
+		return nil
+	})
+
+	go func() {
+		if err := server.Listen("127.0.0.1:0"); err != nil {
+			t.Logf("Server error: %v", err)
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Close()
+
+	serverAddr := server.conn.LocalAddr().String()
+
+	// Send to an unregistered ID (should hit default handler)
+	controller := NewDDPController()
+	err := controller.ConnectUDP(serverAddr)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer controller.Close()
+
+	// Set a different ID
+	controller.SetID(99)
+
+	testData := []byte{128, 128, 128}
+	_, err = controller.Write(testData)
+	if err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+
+	select {
+	case packet := <-received:
+		if packet.Header.ID != 99 {
+			t.Errorf("ID = %d, expected 99", packet.Header.ID)
+		}
+		if !bytes.Equal(packet.Data, testData) {
+			t.Errorf("Data mismatch")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout waiting for packet")
+	}
+}
+
+// Test server with multiple handlers
+func TestDDPServerMultipleHandlers(t *testing.T) {
+	server := NewDDPServer()
+
+	received1 := make(chan *DDPPacket, 1)
+	received2 := make(chan *DDPPacket, 1)
+
+	server.RegisterHandler(1, func(packet *DDPPacket, addr *net.UDPAddr) error {
+		received1 <- packet
+		return nil
+	})
+
+	server.RegisterHandler(2, func(packet *DDPPacket, addr *net.UDPAddr) error {
+		received2 <- packet
+		return nil
+	})
+
+	go func() {
+		if err := server.Listen("127.0.0.1:0"); err != nil {
+			t.Logf("Server error: %v", err)
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Close()
+
+	serverAddr := server.conn.LocalAddr().String()
+
+	// Send to ID 1
+	controller1 := NewDDPController()
+	err := controller1.ConnectUDP(serverAddr)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer controller1.Close()
+
+	controller1.SetID(1)
+	data1 := []byte{255, 0, 0}
+	time.Sleep(10 * time.Millisecond) // Give connection time to establish
+	controller1.Write(data1)
+
+	// Send to ID 2
+	controller2 := NewDDPController()
+	err = controller2.ConnectUDP(serverAddr)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer controller2.Close()
+
+	controller2.SetID(2)
+	data2 := []byte{0, 255, 0}
+	time.Sleep(10 * time.Millisecond) // Give connection time to establish
+	controller2.Write(data2)
+
+	// Check both were received
+	timeout := time.After(1 * time.Second)
+
+	select {
+	case <-received1:
+	case <-timeout:
+		t.Fatal("Timeout waiting for packet to handler 1")
+	}
+
+	select {
+	case <-received2:
+	case <-timeout:
+		t.Fatal("Timeout waiting for packet to handler 2")
+	}
+}
+
+// Test server receiving packet with timecode
+func TestDDPServerTimecode(t *testing.T) {
+	server := NewDDPServer()
+
+	received := make(chan *DDPPacket, 1)
+
+	server.RegisterHandler(1, func(packet *DDPPacket, addr *net.UDPAddr) error {
+		received <- packet
+		return nil
+	})
+
+	go func() {
+		if err := server.Listen("127.0.0.1:0"); err != nil {
+			t.Logf("Server error: %v", err)
+		}
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	defer server.Close()
+
+	serverAddr := server.conn.LocalAddr().String()
+
+	controller := NewDDPController()
+	err := controller.ConnectUDP(serverAddr)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer controller.Close()
+
+	// Enable timecode
+	testTimecode := uint32(0x12345678)
+	controller.SetTimecode(testTimecode)
+
+	testData := []byte{64, 64, 64}
+	_, err = controller.Write(testData)
+	if err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+
+	select {
+	case packet := <-received:
+		if !packet.Header.F1.Timecode {
+			t.Error("Timecode flag should be set")
+		}
+		if packet.Header.Timecode != testTimecode {
+			t.Errorf("Timecode = 0x%08X, expected 0x%08X", packet.Header.Timecode, testTimecode)
+		}
+		if !bytes.Equal(packet.Data, testData) {
+			t.Errorf("Data mismatch")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout waiting for packet")
 	}
 }
